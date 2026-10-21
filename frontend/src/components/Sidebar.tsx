@@ -87,6 +87,7 @@ export default function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     navigation[1],
     navigation[2],
     navigation[3],
+    { label: "Case Transfer", path: "/case-transfers", icon: <SubmissionIcon /> },
     {
       label: user?.role === "admin" ? "Case Review Center" : "Case Submissions",
       path: user?.role === "admin" ? "/case-review-center" : "/case-submissions",

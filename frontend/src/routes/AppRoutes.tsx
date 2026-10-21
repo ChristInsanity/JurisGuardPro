@@ -7,6 +7,7 @@ import LoginPage from "../pages/auth/LoginPage";
 import RegisterPage from "../pages/auth/RegisterPage";
 import AuditLogsPage from "../pages/AuditLogsPage";
 import CaseSubmissionsPage from "../pages/CaseSubmissionsPage";
+import CaseTransferPage from "../pages/CaseTransferPage";
 import CivilCases from "../pages/CivilCases";
 import CriminalCases from "../pages/CriminalCases";
 import Dashboard from "../pages/Dashboard";
@@ -112,6 +113,14 @@ export default function AppRoutes() {
           element={
             <ProtectedRoute>
               <CaseSubmissionsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/case-transfers"
+          element={
+            <ProtectedRoute>
+              <CaseTransferPage />
             </ProtectedRoute>
           }
         />

@@ -211,6 +211,19 @@ class SubmissionFeedbackPayload(BaseModel):
     comments: str
 
 
+class TransferReportPayload(BaseModel):
+    title: str
+    report_date: str
+    to_user_id: int
+    case_ids: list[int] = []
+    administrative_entries: list[dict[str, Any]] = []
+    remarks: str | None = None
+
+
+class TransferReturnPayload(BaseModel):
+    remarks: str
+
+
 def template_path(language: str) -> Path:
     if language == "filipino":
         candidate = Path(__file__).resolve().parent.parent / "formx.html"
@@ -458,6 +471,55 @@ def ensure_schema_compatibility() -> None:
         """,
         "CREATE INDEX IF NOT EXISTS ix_submission_feedback_feedback_id ON submission_feedback (feedback_id)",
         "CREATE INDEX IF NOT EXISTS ix_submission_feedback_submission_id ON submission_feedback (submission_id)",
+        """
+        CREATE TABLE IF NOT EXISTS case_transfer_report (
+            report_id SERIAL PRIMARY KEY,
+            parent_report_id INTEGER REFERENCES case_transfer_report(report_id),
+            from_user_id INTEGER NOT NULL REFERENCES "user"(user_id),
+            to_user_id INTEGER NOT NULL REFERENCES "user"(user_id),
+            title TEXT NOT NULL,
+            report_date TIMESTAMP NOT NULL,
+            date_received TIMESTAMP,
+            status VARCHAR(30) NOT NULL DEFAULT 'Draft',
+            remarks TEXT,
+            submitted_at TIMESTAMP,
+            returned_at TIMESTAMP,
+            confirmed_at TIMESTAMP,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_case_transfer_report_from_user_id ON case_transfer_report (from_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_case_transfer_report_to_user_id ON case_transfer_report (to_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_case_transfer_report_status ON case_transfer_report (status)",
+        """
+        CREATE TABLE IF NOT EXISTS case_transfer_item (
+            item_id SERIAL PRIMARY KEY,
+            report_id INTEGER NOT NULL REFERENCES case_transfer_report(report_id),
+            case_id INTEGER NOT NULL REFERENCES "case"(case_id),
+            section VARCHAR(20) NOT NULL,
+            snapshot_json JSONB NOT NULL,
+            CONSTRAINT uq_case_transfer_report_case UNIQUE (report_id, case_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_case_transfer_item_report_id ON case_transfer_item (report_id)",
+        "CREATE INDEX IF NOT EXISTS ix_case_transfer_item_case_id ON case_transfer_item (case_id)",
+        """
+        CREATE TABLE IF NOT EXISTS case_transfer_administrative_entry (
+            entry_id SERIAL PRIMARY KEY,
+            report_id INTEGER NOT NULL REFERENCES case_transfer_report(report_id),
+            section VARCHAR(10) NOT NULL,
+            row_number INTEGER NOT NULL,
+            control_no VARCHAR(100),
+            title_of_case TEXT,
+            docket_no VARCHAR(100),
+            date_received TIMESTAMP,
+            status_of_case VARCHAR(100),
+            cause_of_action TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_case_transfer_admin_report_id ON case_transfer_administrative_entry (report_id)",
     ]
     with engine.begin() as connection:
         for statement in statements:
@@ -1341,6 +1403,104 @@ def populate_submission_items(
                 snapshot_json=submission_case_snapshot(record),
             )
         )
+
+
+def transfer_group_id(report: models.CaseTransferReport) -> int:
+    return report.parent_report_id or report.report_id
+
+
+def transfer_case_snapshot(record: models.Case) -> dict[str, Any]:
+    payload = get_case_payload(record)
+    return {
+        "case_id": record.case_id,
+        "case_type": record.case_type,
+        "control_no": payload["intake_record"].get("control_no", ""),
+        "title_of_case": record.title_of_case or "",
+        "case_no": record.case_no or "",
+        "date_received": payload["intake_record"].get("form_date", ""),
+        "status_of_case": record.status_of_case or record.case_status or "",
+        "cause_of_action": record.cause_of_action or "",
+        "assigned_pao": record.assigned_pao or "",
+    }
+
+
+def transfer_report_access(report: models.CaseTransferReport, user: models.User) -> bool:
+    return is_admin(user) or report.from_user_id == user.user_id or report.to_user_id == user.user_id
+
+
+def ensure_transfer_access(report_id: int, user: models.User, db: Session) -> models.CaseTransferReport:
+    report = db.get(models.CaseTransferReport, report_id)
+    if not report or not transfer_report_access(report, user):
+        raise HTTPException(status_code=404, detail="Transfer report not found")
+    return report
+
+
+def transfer_user(db: Session, user_id: int) -> models.User:
+    person = db.query(models.User).join(models.Role).filter(
+        models.User.user_id == user_id,
+        models.User.is_active.is_(True),
+        models.User.approval_status == "approved",
+    ).first()
+    if not person or is_admin(person):
+        raise HTTPException(status_code=422, detail="Select an active approved staff recipient")
+    return person
+
+
+def build_transfer_payload(report: models.CaseTransferReport, include_items: bool = True) -> dict[str, Any]:
+    items = sorted(report.items, key=lambda item: (item.section, item.item_id))
+    admin_entries = sorted(report.administrative_entries, key=lambda entry: (entry.section, entry.row_number, entry.entry_id))
+    return {
+        "report_id": report.report_id,
+        "parent_report_id": report.parent_report_id,
+        "title": report.title,
+        "report_date": report.report_date.isoformat() if report.report_date else "",
+        "date_received": report.date_received.isoformat() if report.date_received else None,
+        "status": report.status,
+        "remarks": report.remarks or "",
+        "version": report.version,
+        "from_user_id": report.from_user_id,
+        "from_user_name": report.from_user.full_name or report.from_user.email or report.from_user.username,
+        "to_user_id": report.to_user_id,
+        "to_user_name": report.to_user.full_name or report.to_user.email or report.to_user.username,
+        "submitted_at": report.submitted_at.isoformat() if report.submitted_at else None,
+        "returned_at": report.returned_at.isoformat() if report.returned_at else None,
+        "confirmed_at": report.confirmed_at.isoformat() if report.confirmed_at else None,
+        "created_at": report.created_at.isoformat() if report.created_at else "",
+        "updated_at": report.updated_at.isoformat() if report.updated_at else "",
+        "items": [
+            {"item_id": item.item_id, "case_id": item.case_id, "section": item.section, "snapshot": item.snapshot_json}
+            for item in items
+        ] if include_items else [],
+        "administrative_entries": [
+            {
+                "entry_id": entry.entry_id,
+                "section": entry.section,
+                "row_number": entry.row_number,
+                "control_no": entry.control_no or "",
+                "title_of_case": entry.title_of_case or "",
+                "docket_no": entry.docket_no or "",
+                "date_received": entry.date_received.isoformat() if entry.date_received else "",
+                "status_of_case": entry.status_of_case or "",
+                "cause_of_action": entry.cause_of_action or "",
+            }
+            for entry in admin_entries
+        ],
+    }
+
+
+def validate_transfer_case_ids(db: Session, user: models.User, case_ids: list[int]) -> list[models.Case]:
+    unique_ids = list(dict.fromkeys(case_ids))
+    if len(unique_ids) != len(case_ids):
+        raise HTTPException(status_code=422, detail="Duplicate case references are not allowed")
+    if not unique_ids:
+        raise HTTPException(status_code=422, detail="Select at least one Criminal or Civil case")
+    records = []
+    for case_id in unique_ids:
+        record = ensure_case_access(db.get(models.Case, case_id), user)
+        if record.is_terminated or (record.status_of_case or "").lower() == "terminated":
+            raise HTTPException(status_code=409, detail=f"Case {case_id} is not eligible for transfer")
+        records.append(record)
+    return records
 
 
 def apply_client_payload(client: models.Client, payload: ClientPayload) -> None:
@@ -2678,6 +2838,210 @@ def resubmit_case_submission(
     db.commit()
     db.refresh(submission)
     return submission_to_payload(submission)
+
+
+@app.get("/api/case-transfers/attorneys")
+def list_transfer_attorneys(user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    if is_admin(user):
+        raise HTTPException(status_code=403, detail="Staff account required")
+    people = db.query(models.User).join(models.Role).filter(
+        models.User.is_active.is_(True),
+        models.User.approval_status == "approved",
+    ).order_by(models.User.full_name, models.User.user_id).all()
+    return [
+        {"user_id": person.user_id, "full_name": person.full_name or person.email or person.username}
+        for person in people if not is_admin(person)
+    ]
+
+
+@app.get("/api/case-transfers/cases")
+def list_transfer_cases(
+    case_type: Literal["Criminal", "Civil"],
+    search: str | None = None,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    query = scoped_case_query(db, user).filter(
+        models.Case.case_type == case_type,
+        or_(models.Case.is_terminated.is_(False), models.Case.is_terminated.is_(None)),
+    )
+    if search and search.strip():
+        pattern = f"%{search.strip()}%"
+        query = query.filter(or_(
+            models.Case.title_of_case.ilike(pattern),
+            models.Case.case_no.ilike(pattern),
+            models.IntakeRecord.control_no.ilike(pattern),
+        ))
+    return [transfer_case_snapshot(record) for record in query.order_by(models.Case.last_updated.desc()).limit(250).all()]
+
+
+@app.get("/api/case-transfers")
+def list_case_transfers(user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    query = db.query(models.CaseTransferReport)
+    if not is_admin(user):
+        query = query.filter(or_(models.CaseTransferReport.from_user_id == user.user_id, models.CaseTransferReport.to_user_id == user.user_id))
+    reports = query.order_by(models.CaseTransferReport.updated_at.desc(), models.CaseTransferReport.report_id.desc()).all()
+    return [build_transfer_payload(report, include_items=False) for report in reports]
+
+
+@app.post("/api/case-transfers")
+def create_case_transfer(
+    payload: TransferReportPayload,
+    request: Request,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    if is_admin(user):
+        raise HTTPException(status_code=403, detail="Staff account required")
+    recipient = transfer_user(db, payload.to_user_id)
+    report_date = parse_date(payload.report_date)
+    if not report_date:
+        raise HTTPException(status_code=422, detail="A valid report date is required")
+    records = validate_transfer_case_ids(db, user, payload.case_ids)
+    report = models.CaseTransferReport(
+        from_user_id=user.user_id,
+        to_user_id=recipient.user_id,
+        title=payload.title.strip() or "Transfer of Cases",
+        report_date=report_date,
+        status="Draft",
+        remarks=payload.remarks,
+    )
+    db.add(report)
+    db.flush()
+    for record in records:
+        db.add(models.CaseTransferItem(
+            report_id=report.report_id,
+            case_id=record.case_id,
+            section="Criminal" if record.case_type == "Criminal" else "Civil",
+            snapshot_json=transfer_case_snapshot(record),
+        ))
+    for raw in payload.administrative_entries:
+        section = str(raw.get("section") or "").upper()
+        if section not in {"ADMIN 1", "ADMIN 2", "ADMIN 3"}:
+            raise HTTPException(status_code=422, detail="Administrative section must be ADMIN 1, ADMIN 2, or ADMIN 3")
+        db.add(models.CaseTransferAdministrativeEntry(
+            report_id=report.report_id,
+            section=section,
+            row_number=int(raw.get("row_number") or 1),
+            control_no=raw.get("control_no"),
+            title_of_case=raw.get("title_of_case"),
+            docket_no=raw.get("docket_no"),
+            date_received=parse_date(raw.get("date_received")),
+            status_of_case=raw.get("status_of_case"),
+            cause_of_action=raw.get("cause_of_action"),
+        ))
+    write_audit(db, user.user_id, "Create Transfer Draft", "case_transfer", f"Created transfer report {report.title}", str(report.report_id), request)
+    db.commit()
+    db.refresh(report)
+    return build_transfer_payload(report)
+
+
+@app.get("/api/case-transfers/{report_id}")
+def get_case_transfer(report_id: int, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    return build_transfer_payload(ensure_transfer_access(report_id, user, db))
+
+
+@app.patch("/api/case-transfers/{report_id}")
+def update_case_transfer(
+    report_id: int,
+    payload: TransferReportPayload,
+    request: Request,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    report = ensure_transfer_access(report_id, user, db)
+    if report.from_user_id != user.user_id or report.status not in {"Draft", "Returned for Correction"}:
+        raise HTTPException(status_code=403, detail="Only editable transfer reports may be changed")
+    recipient = transfer_user(db, payload.to_user_id)
+    report_date = parse_date(payload.report_date)
+    if not report_date:
+        raise HTTPException(status_code=422, detail="A valid report date is required")
+    records = validate_transfer_case_ids(db, user, payload.case_ids)
+    report.to_user_id = recipient.user_id
+    report.title = payload.title.strip() or "Transfer of Cases"
+    report.report_date = report_date
+    report.remarks = payload.remarks
+    report.items.clear()
+    report.administrative_entries.clear()
+    db.flush()
+    for record in records:
+        report.items.append(models.CaseTransferItem(case_id=record.case_id, section=record.case_type, snapshot_json=transfer_case_snapshot(record)))
+    for raw in payload.administrative_entries:
+        report.administrative_entries.append(models.CaseTransferAdministrativeEntry(
+            section=str(raw.get("section") or "").upper(), row_number=int(raw.get("row_number") or 1),
+            control_no=raw.get("control_no"), title_of_case=raw.get("title_of_case"), docket_no=raw.get("docket_no"),
+            date_received=parse_date(raw.get("date_received")), status_of_case=raw.get("status_of_case"), cause_of_action=raw.get("cause_of_action"),
+        ))
+    report.status = "Draft"
+    report.updated_at = datetime.now()
+    write_audit(db, user.user_id, "Update Transfer Draft", "case_transfer", f"Updated transfer report {report.title}", str(report.report_id), request)
+    db.commit()
+    db.refresh(report)
+    return build_transfer_payload(report)
+
+
+@app.post("/api/case-transfers/{report_id}/submit")
+def submit_case_transfer(report_id: int, request: Request, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    report = ensure_transfer_access(report_id, user, db)
+    if report.from_user_id != user.user_id or report.status not in {"Draft", "Returned for Correction"}:
+        raise HTTPException(status_code=403, detail="Only editable transfer reports may be submitted")
+    if not report.items:
+        raise HTTPException(status_code=422, detail="Select at least one case before submission")
+    report.status = "Pending Receipt"
+    report.submitted_at = datetime.now()
+    report.updated_at = datetime.now()
+    write_audit(db, user.user_id, "Submit Case Transfer", "case_transfer", f"Submitted transfer report {report.title}", str(report.report_id), request)
+    db.commit()
+    db.refresh(report)
+    return build_transfer_payload(report)
+
+
+@app.post("/api/case-transfers/{report_id}/return")
+def return_case_transfer(report_id: int, payload: TransferReturnPayload, request: Request, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    report = ensure_transfer_access(report_id, user, db)
+    remarks = payload.remarks.strip()
+    if report.to_user_id != user.user_id or report.status != "Pending Receipt":
+        raise HTTPException(status_code=403, detail="Only the receiving attorney may return a pending transfer")
+    if len(remarks) < 5:
+        raise HTTPException(status_code=422, detail="Meaningful correction remarks are required")
+    report.status = "Returned for Correction"
+    report.remarks = remarks
+    report.returned_at = datetime.now()
+    report.updated_at = datetime.now()
+    write_audit(db, user.user_id, "Return Case Transfer", "case_transfer", remarks, str(report.report_id), request)
+    db.commit()
+    db.refresh(report)
+    return build_transfer_payload(report)
+
+
+@app.post("/api/case-transfers/{report_id}/confirm")
+def confirm_case_transfer(report_id: int, request: Request, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    report = db.query(models.CaseTransferReport).filter(models.CaseTransferReport.report_id == report_id).with_for_update().first()
+    if not report or report.to_user_id != user.user_id:
+        raise HTTPException(status_code=404, detail="Transfer report not found")
+    if report.status != "Pending Receipt":
+        raise HTTPException(status_code=409, detail="Transfer is no longer pending receipt")
+    case_ids = [item.case_id for item in report.items]
+    if len(case_ids) != len(set(case_ids)):
+        raise HTTPException(status_code=409, detail="Transfer contains duplicate case references")
+    records = [db.query(models.Case).filter(models.Case.case_id == case_id).with_for_update().first() for case_id in case_ids]
+    if any(record is None or record.is_terminated for record in records):
+        raise HTTPException(status_code=409, detail="One or more cases are no longer eligible for transfer")
+    previous_names = []
+    for record in records:
+        previous_names.append(record.assigned_pao or (record.intake.interviewer.full_name if record.intake and getattr(record.intake, "interviewer", None) else ""))
+        record.assigned_pao = user.full_name or user.email or user.username
+        if record.intake:
+            record.intake.interviewer_id = user.user_id
+        db.add(models.CaseHistory(case_id=record.case_id, updated_by=user.user_id, previous_status=record.status_of_case, new_status=record.status_of_case or "Pending", action_taken="Case transferred", remarks=f"Transfer report #{report.report_id}; previous assignment: {previous_names[-1]}"))
+    report.status = "Completed"
+    report.date_received = datetime.now()
+    report.confirmed_at = datetime.now()
+    report.updated_at = datetime.now()
+    write_audit(db, user.user_id, "Confirm Case Transfer", "case_transfer", json.dumps({"report_id": report.report_id, "case_ids": case_ids, "previous_assignments": previous_names, "new_assignment": user.user_id}), str(report.report_id), request)
+    db.commit()
+    db.refresh(report)
+    return build_transfer_payload(report)
 
 
 @app.get("/api/clients/")

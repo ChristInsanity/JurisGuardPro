@@ -405,3 +405,60 @@ class SubmissionFeedback(Base):
 
     submission = relationship("CaseSubmission", back_populates="feedback")
     reviewer = relationship("User", foreign_keys=[reviewer_id])
+
+
+class CaseTransferReport(Base):
+    __tablename__ = "case_transfer_report"
+
+    report_id = Column(Integer, primary_key=True, index=True)
+    parent_report_id = Column(Integer, ForeignKey("case_transfer_report.report_id"))
+    from_user_id = Column(Integer, ForeignKey("user.user_id"), nullable=False, index=True)
+    to_user_id = Column(Integer, ForeignKey("user.user_id"), nullable=False, index=True)
+    title = Column(Text, nullable=False)
+    report_date = Column(DateTime, nullable=False)
+    date_received = Column(DateTime)
+    status = Column(String(30), nullable=False, default="Draft", index=True)
+    remarks = Column(Text)
+    submitted_at = Column(DateTime)
+    returned_at = Column(DateTime)
+    confirmed_at = Column(DateTime)
+    version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    from_user = relationship("User", foreign_keys=[from_user_id])
+    to_user = relationship("User", foreign_keys=[to_user_id])
+    parent_report = relationship("CaseTransferReport", remote_side=[report_id])
+    items = relationship("CaseTransferItem", back_populates="report", cascade="all, delete-orphan")
+    administrative_entries = relationship("CaseTransferAdministrativeEntry", back_populates="report", cascade="all, delete-orphan")
+
+
+class CaseTransferItem(Base):
+    __tablename__ = "case_transfer_item"
+    __table_args__ = (UniqueConstraint("report_id", "case_id", name="uq_case_transfer_report_case"),)
+
+    item_id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(Integer, ForeignKey("case_transfer_report.report_id"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("case.case_id"), nullable=False, index=True)
+    section = Column(String(20), nullable=False)
+    snapshot_json = Column(JSONB, nullable=False)
+
+    report = relationship("CaseTransferReport", back_populates="items")
+    case = relationship("Case")
+
+
+class CaseTransferAdministrativeEntry(Base):
+    __tablename__ = "case_transfer_administrative_entry"
+
+    entry_id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(Integer, ForeignKey("case_transfer_report.report_id"), nullable=False, index=True)
+    section = Column(String(10), nullable=False)
+    row_number = Column(Integer, nullable=False)
+    control_no = Column(String(100))
+    title_of_case = Column(Text)
+    docket_no = Column(String(100))
+    date_received = Column(DateTime)
+    status_of_case = Column(String(100))
+    cause_of_action = Column(Text)
+
+    report = relationship("CaseTransferReport", back_populates="administrative_entries")
