@@ -40,6 +40,8 @@ export interface CaseTransfer {
   from_user_name: string;
   to_user_id: number;
   to_user_name: string;
+  initiated_by_user_id: number | null;
+  initiated_by_user_name: string | null;
   submitted_at: string | null;
   returned_at: string | null;
   confirmed_at: string | null;
@@ -51,6 +53,7 @@ export interface CaseTransfer {
 export interface TransferPayload {
   title: string;
   report_date: string;
+  from_user_id?: number;
   to_user_id: number;
   case_ids: number[];
   administrative_entries: TransferAdminEntry[];
@@ -60,8 +63,8 @@ export interface TransferPayload {
 export async function listTransferAttorneys() {
   return (await apiClient.get<TransferAttorney[]>("/case-transfers/attorneys")).data;
 }
-export async function listTransferCases(caseType: "Criminal" | "Civil", search = "") {
-  return (await apiClient.get<TransferCase[]>("/case-transfers/cases", { params: { case_type: caseType, search: search || undefined } })).data;
+export async function listTransferCases(caseType: "Criminal" | "Civil", search = "", sourceUserId?: number) {
+  return (await apiClient.get<TransferCase[]>("/case-transfers/cases", { params: { case_type: caseType, search: search || undefined, source_user_id: sourceUserId } })).data;
 }
 export async function listCaseTransfers() {
   return (await apiClient.get<CaseTransfer[]>("/case-transfers")).data;
@@ -153,7 +156,8 @@ export async function buildCaseTransferExcel(report: CaseTransfer, logo1Url: str
   const [logo1Buffer, logo2Buffer] = await Promise.all([loadImage(logo1Url), loadImage(logo2Url)]);
   const logo1Id = workbook.addImage({ buffer: logo1Buffer, extension: "png" });
   const logo2Id = workbook.addImage({ buffer: logo2Buffer, extension: "png" });
-  sheet.addImage(logo1Id, { tl: { col: 0.15, row: 0.15 }, ext: { width: 62, height: 62 } });
-  sheet.addImage(logo2Id, { tl: { col: 5.95, row: 0.15 }, ext: { width: 82, height: 62 } });
+  // Fit each supplied logo inside a one-inch (96px at the workbook's screen/print CSS scale) box without distortion.
+  sheet.addImage(logo1Id, { tl: { col: 0.08, row: 0.15 }, ext: { width: 96, height: 58.5 } });
+  sheet.addImage(logo2Id, { tl: { col: 5.78, row: 0.15 }, ext: { width: 96, height: 89.5 } });
   return workbook.xlsx.writeBuffer();
 }

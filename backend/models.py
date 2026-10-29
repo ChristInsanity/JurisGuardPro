@@ -414,6 +414,7 @@ class CaseTransferReport(Base):
     parent_report_id = Column(Integer, ForeignKey("case_transfer_report.report_id"))
     from_user_id = Column(Integer, ForeignKey("user.user_id"), nullable=False, index=True)
     to_user_id = Column(Integer, ForeignKey("user.user_id"), nullable=False, index=True)
+    initiated_by_user_id = Column(Integer, ForeignKey("user.user_id"), index=True)
     title = Column(Text, nullable=False)
     report_date = Column(DateTime, nullable=False)
     date_received = Column(DateTime)
@@ -428,6 +429,7 @@ class CaseTransferReport(Base):
 
     from_user = relationship("User", foreign_keys=[from_user_id])
     to_user = relationship("User", foreign_keys=[to_user_id])
+    initiated_by_user = relationship("User", foreign_keys=[initiated_by_user_id])
     parent_report = relationship("CaseTransferReport", remote_side=[report_id])
     items = relationship("CaseTransferItem", back_populates="report", cascade="all, delete-orphan")
     administrative_entries = relationship("CaseTransferAdministrativeEntry", back_populates="report", cascade="all, delete-orphan")
